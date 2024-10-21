@@ -1,43 +1,22 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
+﻿using NETworkManager.Models.Network;
+using NETworkManager.Settings;
+using NETworkManager.Utilities;
+using System;
 using System.Net;
 using System.Net.Http;
-using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
-using NETworkManager.Models.Network;
-using NETworkManager.Settings;
-using NETworkManager.Utilities;
+using log4net;
 using NetworkInterface = NETworkManager.Models.Network.NetworkInterface;
 
 namespace NETworkManager.ViewModels;
 
 public class NetworkConnectionWidgetViewModel : ViewModelBase
 {
-    #region Events
-
-    private void SettingsManager_PropertyChanged(object sender, PropertyChangedEventArgs e)
-    {
-        switch (e.PropertyName)
-        {
-            case nameof(SettingsInfo.Dashboard_CheckPublicIPAddress):
-                OnPropertyChanged(nameof(CheckPublicIPAddressEnabled));
-
-                // Check connection if enabled via settings
-                if (CheckPublicIPAddressEnabled)
-                    CheckConnection();
-
-                break;
-        }
-    }
-
-    #endregion
-
     #region Variables
-
+    private static readonly ILog Log = LogManager.GetLogger(typeof(NetworkConnectionWidgetViewModel));
     private bool _isChecking;
 
     #region Computer
@@ -465,14 +444,7 @@ public class NetworkConnectionWidgetViewModel : ViewModelBase
 
     public NetworkConnectionWidgetViewModel()
     {
-        // Detect if network address or status changed...
-        NetworkChange.NetworkAvailabilityChanged += (_, _) => CheckConnection();
-        NetworkChange.NetworkAddressChanged += (_, _) => CheckConnection();
-
         LoadSettings();
-
-        // Detect if settings have changed...
-        SettingsManager.Current.PropertyChanged += SettingsManager_PropertyChanged;
     }
 
     private void LoadSettings()
@@ -483,69 +455,81 @@ public class NetworkConnectionWidgetViewModel : ViewModelBase
 
     #region ICommands & Actions
 
-    public ICommand CheckConnectionViaHotkeyCommand => new RelayCommand(_ => CheckConnectionViaHotkeyAction());
+    public ICommand CheckViaHotkeyCommand => new RelayCommand(_ => CheckViaHotkeyAction());
 
-    private void CheckConnectionViaHotkeyAction()
+    private void CheckViaHotkeyAction()
     {
-        CheckConnection();
+        Check();
     }
 
     #endregion
 
     #region Methods
 
-    public void CheckConnection()
+    public void Check()
     {
-        CheckConnectionAsync().ConfigureAwait(false);
+        CheckAsync().ConfigureAwait(false);
     }
 
     private CancellationTokenSource _tokenSource;
     private CancellationToken _ct;
+    private Task _checkTask = Task.CompletedTask;
 
-    private async Task CheckConnectionAsync()
+    private async Task CheckAsync()
     {
-        // Already in queue
-        if (_tokenSource is { IsCancellationRequested: true })
+        // Return if cancellation is already requested
+        if(_tokenSource is { IsCancellationRequested: true })
             return;
-
-        // Cancel if running
+        
+        // Cancel previous checks if running
         if (_isChecking)
-        {
-            _tokenSource.Cancel();
+        { 
+            await _tokenSource.CancelAsync();
 
-            while (_isChecking) await Task.Delay(250, _ct);
+            try
+            {
+                await _checkTask;
+            }
+            catch(OperationCanceledException)
+            {
+                // Handle task cancellation
+            }
+            finally
+            {
+                _tokenSource.Dispose();
+            }
         }
-
+        
         // Start check
         _isChecking = true;
-
         _tokenSource = new CancellationTokenSource();
         _ct = _tokenSource.Token;
-
+        
+        // Run tasks
         try
         {
-            await Task.Run(async () =>
-            {
-                List<Task> tasks = new()
-                {
-                    CheckConnectionComputerAsync(_ct),
-                    CheckConnectionRouterAsync(_ct),
-                    CheckConnectionInternetAsync(_ct)
-                };
-
-                await Task.WhenAll(tasks);
-            }, _tokenSource.Token);
+            _checkTask = RunTasks(_ct);
+            await _checkTask;
         }
-        catch (OperationCanceledException)
+        catch(OperationCanceledException)
         {
+            // Handle task cancellation
         }
         finally
         {
-            _tokenSource.Dispose();
             _isChecking = false;
         }
     }
-
+    
+    private async Task RunTasks(CancellationToken ct)
+    {
+        await Task.WhenAll(
+            CheckConnectionComputerAsync(ct),
+            CheckConnectionRouterAsync(ct),
+            CheckConnectionInternetAsync(ct)
+        );
+    }
+    
     private Task CheckConnectionComputerAsync(CancellationToken ct)
     {
         return Task.Run(async () =>
@@ -554,9 +538,11 @@ public class NetworkConnectionWidgetViewModel : ViewModelBase
             IsComputerIPv4Checking = true;
             ComputerIPv4 = "";
             ComputerIPv4State = ConnectionState.None;
+            
             IsComputerIPv6Checking = true;
             ComputerIPv6 = "";
             ComputerIPv6State = ConnectionState.None;
+            
             IsComputerDNSChecking = true;
             ComputerDNS = "";
             ComputerDNSState = ConnectionState.None;
@@ -875,6 +861,6 @@ public class NetworkConnectionWidgetViewModel : ViewModelBase
             IsInternetDNSChecking = false;
         }, ct);
     }
-
     #endregion
+
 }
